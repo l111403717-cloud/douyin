@@ -30,6 +30,8 @@ from myUtils.douyin_benchmark import (
     discover_douyin_benchmark_accounts,
     normalize_douyin_user_url,
     scrape_douyin_benchmark,
+    search_douyin_content,
+    open_douyin_login_browser,
 )
 from flask import Flask, request, jsonify, Response, render_template, send_from_directory
 from backend_app.agent.gateway_client import (
@@ -209,6 +211,7 @@ def require_local_login():
         "/favicon.ico",
         "/auth/login",
         "/runtime/identity",
+        "/runtime/douyin/session",
     }
     if request.path in public_paths or request.path.startswith("/assets/"):
         return None
@@ -234,6 +237,38 @@ def runtime_identity():
     })
     response.headers["X-SAU-Instance-Token"] = os.environ.get("SAU_INSTANCE_TOKEN", "")
     return response
+
+
+@app.route("/runtime/douyin/session", methods=["POST"])
+def runtime_douyin_session():
+    expected = os.environ.get("SAU_INSTANCE_TOKEN", "")
+    provided = request.headers.get("X-SAU-Instance-Token", "")
+    if not expected or not secrets.compare_digest(expected, provided):
+        return jsonify({"code": 403, "message": "无效的桌面运行时令牌", "data": None}), 403
+    payload = request.get_json(silent=True) or {}
+    source_cookies = payload.get("cookies") if isinstance(payload.get("cookies"), list) else []
+    cookies = []
+    for item in source_cookies:
+        domain = str(item.get("domain") or "")
+        if "douyin" not in domain:
+            continue
+        cookie = {
+            "name": str(item.get("name") or ""),
+            "value": str(item.get("value") or ""),
+            "domain": domain,
+            "path": str(item.get("path") or "/"),
+            "httpOnly": bool(item.get("httpOnly")),
+            "secure": bool(item.get("secure")),
+            "sameSite": item.get("sameSite") if item.get("sameSite") in {"Strict", "Lax", "None"} else "Lax",
+        }
+        if item.get("expirationDate"):
+            cookie["expires"] = float(item["expirationDate"])
+        if cookie["name"]:
+            cookies.append(cookie)
+    state_path = Path(BASE_DIR / "cookiesFile" / "douyin-electron-session.json")
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps({"cookies": cookies, "origins": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"code": 200, "message": "抖音会话已同步", "data": {"cookieCount": len(cookies)}}), 200
 
 
 @app.route("/auth/login", methods=["POST"])
@@ -299,10 +334,29 @@ def hermes_settings_api():
 @app.route("/settings/hermes/test", methods=["POST"])
 def test_hermes_settings():
     try:
-        health = hermes_request("/health", timeout=15)
+        payload = request.get_json(silent=True) or {}
+        saved_settings = load_runtime_settings()
+        saved_hermes = get_hermes_settings(saved_settings)
+        gateway_url = str(payload.get("gatewayUrl") or "").strip().rstrip("/")
+        if not re.match(r"^https?://", gateway_url, re.IGNORECASE):
+            return jsonify({"code": 400, "message": "Gateway 地址必须以 http:// 或 https:// 开头"}), 400
+        try:
+            timeout = max(10, min(int(payload.get("timeout") or saved_hermes["timeout"]), 1800))
+        except (TypeError, ValueError):
+            return jsonify({"code": 400, "message": "超时时间必须是数字"}), 400
+        test_settings = {
+            "hermes": {
+                "gatewayUrl": gateway_url,
+                "apiKey": str(payload.get("apiKey") or saved_hermes["apiKey"]).strip(),
+                "timeout": timeout,
+            }
+        }
+        health = hermes_request("/health", timeout=min(timeout, 15), settings=test_settings)
         capabilities = None
         try:
-            capabilities = hermes_request("/v1/capabilities", timeout=20)
+            capabilities = hermes_request(
+                "/v1/capabilities", timeout=min(timeout, 20), settings=test_settings
+            )
         except Exception as exc:
             backend_log(f"Hermes capabilities unavailable, using legacy mode: {exc}")
         return jsonify({"code": 200, "message": "Hermes Gateway 连接正常", "data": {
@@ -1785,6 +1839,63 @@ def auto_discover_douyin_benchmark_accounts():
         return jsonify({"code": 500, "msg": str(e), "data": None}), 500
 
 
+def run_douyin_content_search_task(task_id, keyword, target_count, cookie_file):
+    try:
+        benchmark_repository.update_search_task(get_db_path(), task_id, status="running", started_at="CURRENT_TIMESTAMP")
+        results = asyncio.run(search_douyin_content([keyword], cookie_file=cookie_file, target_count=target_count))
+        benchmark_repository.save_search_results(get_db_path(), task_id, keyword, results)
+        benchmark_repository.update_search_task(get_db_path(), task_id, status="success", collected_count=len(results), finished_at="CURRENT_TIMESTAMP")
+    except Exception as exc:
+        benchmark_repository.update_search_task(get_db_path(), task_id, status="failed", error_message=str(exc), finished_at="CURRENT_TIMESTAMP")
+
+
+@app.route('/benchmark/douyin/content-search', methods=['POST'])
+def create_douyin_content_search():
+    payload = request.get_json() or {}
+    keyword = str(payload.get('keyword') or '').strip()
+    if not keyword:
+        return jsonify({"code": 400, "msg": "请填写内容关键词", "data": None}), 400
+    target_count = max(10, min(int(payload.get('targetCount') or payload.get('target_count') or 50), 100))
+    task_id = benchmark_repository.create_search_task(get_db_path(), keyword, target_count)
+    thread = threading.Thread(target=run_douyin_content_search_task, args=(task_id, keyword, target_count, latest_douyin_cookie_file()), daemon=True)
+    thread.start()
+    return jsonify({"code": 200, "msg": "success", "data": {"task_id": task_id, "status": "pending"}}), 200
+
+
+@app.route('/benchmark/douyin/login', methods=['POST'])
+def open_douyin_login():
+    """打开可见、持久化的抖音浏览器窗口供用户扫码或处理验证。"""
+    def runner():
+        try:
+            asyncio.run(open_douyin_login_browser())
+        except Exception:
+            traceback.print_exc()
+    threading.Thread(target=runner, daemon=True).start()
+    return jsonify({"code": 200, "msg": "已打开抖音验证窗口", "data": {"status": "opened"}}), 200
+
+
+@app.route('/benchmark/douyin/content-search/<int:task_id>', methods=['GET'])
+def get_douyin_content_search_task(task_id):
+    task = benchmark_repository.get_search_task(get_db_path(), task_id)
+    if not task:
+        return jsonify({"code": 404, "msg": "搜索任务不存在", "data": None}), 404
+    return jsonify({"code": 200, "msg": "success", "data": task}), 200
+
+
+@app.route('/benchmark/douyin/content-search/<int:task_id>/results', methods=['GET'])
+def get_douyin_content_search_results(task_id):
+    if not benchmark_repository.get_search_task(get_db_path(), task_id):
+        return jsonify({"code": 404, "msg": "搜索任务不存在", "data": None}), 404
+    return jsonify({"code": 200, "msg": "success", "data": benchmark_repository.list_search_results(get_db_path(), task_id)}), 200
+
+
+@app.route('/benchmark/douyin/videos', methods=['GET'])
+def get_all_douyin_benchmark_videos():
+    return jsonify({"code": 200, "msg": "success", "data": benchmark_repository.list_all_videos(
+        get_db_path(), request.args.get('keyword'), request.args.get('source_type'), request.args.get('limit', 200)
+    )}), 200
+
+
 @app.route('/own/douyin/import/preview', methods=['POST'])
 def preview_own_douyin_import():
     try:
@@ -1932,6 +2043,25 @@ def create_douyin_benchmark_video_analysis(video_id):
         return jsonify({"code": 200, "msg": "success", "data": parse_douyin_video_analysis(row)}), 200
     except Exception as e:
         return jsonify({"code": 500, "msg": str(e), "data": None}), 500
+
+
+@app.route('/benchmark/douyin/videos/<int:video_id>/pi-analysis', methods=['POST'])
+def save_pi_douyin_benchmark_video_analysis(video_id):
+    video = benchmark_repository.get_video(get_db_path(), video_id)
+    if not video:
+        return jsonify({"code": 404, "msg": "作品不存在", "data": None}), 404
+    payload = request.get_json(silent=True) or {}
+    required_text = ["summary", "hook", "core_viewpoint"]
+    required_lists = ["pain_points", "viral_points", "reusable_points", "script_suggestions"]
+    if any(not str(payload.get(key) or "").strip() for key in required_text):
+        return jsonify({"code": 400, "msg": "PI Agent分析缺少必要文本字段", "data": None}), 400
+    if any(not isinstance(payload.get(key), list) for key in required_lists):
+        return jsonify({"code": 400, "msg": "PI Agent分析数组字段格式错误", "data": None}), 400
+    analysis = {**payload, "analysis_type": "pi_agent"}
+    benchmark_repository.save_analysis(get_db_path(), video_id, analysis)
+    return jsonify({"code": 200, "msg": "PI Agent分析已保存", "data": parse_douyin_video_analysis(
+        benchmark_repository.get_analysis(get_db_path(), video_id)
+    )}), 200
 
 
 @app.route('/idea-radar/douyin/videos', methods=['GET'])

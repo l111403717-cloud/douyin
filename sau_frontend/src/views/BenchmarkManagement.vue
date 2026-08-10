@@ -4,6 +4,41 @@
       <h1>抖音对标管理</h1>
     </div>
 
+    <el-card shadow="never" class="agent-card">
+      <template #header><div class="card-header"><span>PI Agent</span><el-button size="small" @click="savePiSettings">保存模型配置</el-button></div></template>
+      <el-form label-width="90px">
+        <div class="auto-options">
+          <el-form-item label="Base URL"><el-input v-model="piSettings.baseUrl" style="width: 280px" /></el-form-item>
+          <el-form-item label="模型"><el-select v-model="piSettings.model" style="width: 210px"><el-option label="DeepSeek V4 Flash" value="deepseek-v4-flash" /><el-option label="DeepSeek V4 Pro" value="deepseek-v4-pro" /></el-select></el-form-item>
+          <el-form-item label="API Key"><el-input v-model="piSettings.apiKey" type="password" show-password style="width: 260px" placeholder="仅保存在本机安全存储" /></el-form-item>
+        </div>
+      </el-form>
+      <div class="add-row">
+        <el-input v-model="piPrompt" placeholder="例如：搜索 50 条个人成长内容，并总结最常见的开头钩子" @keyup.enter="runPiAgent" />
+        <el-button type="primary" :loading="piRunning" @click="runPiAgent">运行 Agent</el-button>
+      </div>
+      <el-alert v-if="piResult" :title="piResult" type="success" :closable="false" class="agent-result" />
+    </el-card>
+
+    <el-card shadow="never" class="search-card">
+      <template #header><div class="card-header"><span>内容搜索</span><div><el-button size="small" @click="openDouyinLogin">打开抖音窗口</el-button><el-button size="small" type="primary" plain @click="syncDouyinSession">验证完成并同步</el-button><el-tag v-if="searchTask" :type="searchTask.status === 'success' ? 'success' : 'info'">{{ searchTask.status }}</el-tag></div></div></template>
+      <div class="add-row">
+        <el-input v-model="contentKeyword" placeholder="例如：AI 编程、个人 IP、知识付费" clearable />
+        <el-input-number v-model="contentTargetCount" :min="10" :max="100" />
+        <el-button type="primary" :loading="contentSearching" @click="startContentSearch">搜索内容</el-button>
+      </div>
+      <el-progress v-if="contentSearching" :percentage="Math.min(99, Math.round((contentResults.length / contentTargetCount) * 100))" />
+      <el-table v-if="contentResults.length" :data="contentResults" class="search-results" style="width: 100%">
+        <el-table-column prop="source_rank" label="#" width="60" />
+        <el-table-column label="内容" min-width="420">
+          <template #default="scope"><div class="search-content"><el-image v-if="scope.row.cover_url" :src="scope.row.cover_url" fit="cover" class="search-cover" /><div><div class="search-title">{{ scope.row.title }}</div><div class="search-author">{{ scope.row.author_name || '未知作者' }} · {{ scope.row.like_count || '暂无获赞数' }}</div></div></div></template>
+        </el-table-column>
+        <el-table-column label="类型" width="90"><template #default="scope">{{ scope.row.video_type === 'note' ? '图文' : '视频' }}</template></el-table-column>
+        <el-table-column label="操作" width="120"><template #default="scope"><el-link :href="scope.row.video_url" target="_blank" type="primary">打开作品</el-link></template></el-table-column>
+      </el-table>
+      <el-empty v-else-if="!contentSearching" description="输入关键词搜索抖音内容" :image-size="80" />
+    </el-card>
+
     <el-card shadow="never" class="add-card">
       <el-form label-width="100px">
         <el-form-item label="主页链接">
@@ -359,6 +394,15 @@ const analysisLoading = ref(false)
 const analyzingId = ref(null)
 const selectedVideo = ref(null)
 const videoAnalysis = ref(null)
+const contentKeyword = ref('')
+const contentTargetCount = ref(50)
+const contentSearching = ref(false)
+const searchTask = ref(null)
+const contentResults = ref([])
+const piSettings = ref({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-v4-flash', apiKey: '' })
+const piPrompt = ref('')
+const piResult = ref('')
+const piRunning = ref(false)
 
 const avatarText = (account) => {
   return (account.nickname || '抖').slice(0, 1)
@@ -442,6 +486,95 @@ const autoDiscoverAccounts = async () => {
     ElMessage.error('自动找对标失败')
   } finally {
     autoDiscovering.value = false
+  }
+}
+
+const startContentSearch = async () => {
+  if (!contentKeyword.value.trim()) {
+    ElMessage.warning('请先填写内容关键词')
+    return
+  }
+  contentSearching.value = true
+  contentResults.value = []
+  try {
+    const response = await benchmarkApi.createContentSearch({ keyword: contentKeyword.value.trim(), targetCount: contentTargetCount.value })
+    const taskId = response.data?.task_id || response.data?.taskId
+    if (!taskId) throw new Error('搜索任务创建失败')
+    let finished = false
+    while (!finished) {
+      const [taskResponse, resultResponse] = await Promise.all([
+        benchmarkApi.getContentSearchTask(taskId),
+        benchmarkApi.getContentSearchResults(taskId)
+      ])
+      searchTask.value = taskResponse.data || null
+      contentResults.value = resultResponse.data || []
+      finished = ['success', 'failed', 'stopped'].includes(searchTask.value?.status)
+      if (!finished) await new Promise(resolve => setTimeout(resolve, 1200))
+    }
+    if (searchTask.value?.status === 'failed') ElMessage.error(searchTask.value.error_message || '内容搜索失败')
+    else ElMessage.success(`搜索完成，共找到 ${contentResults.value.length} 条内容`)
+  } catch (error) {
+    console.error('内容搜索失败:', error)
+    ElMessage.error(error.message || '内容搜索失败')
+  } finally {
+    contentSearching.value = false
+  }
+}
+
+const openDouyinLogin = async () => {
+  try {
+    if (!window.sunbirdDesktop?.openDouyin) {
+      ElMessage.warning('内置抖音窗口仅在 Sunbird OS 桌面版中可用')
+      return
+    }
+    await window.sunbirdDesktop.openDouyin()
+    ElMessage.success('已打开 Sunbird OS 抖音窗口')
+  } catch (error) {
+    ElMessage.error(error.message || '打开抖音验证窗口失败')
+  }
+}
+
+const syncDouyinSession = async () => {
+  try {
+    if (!window.sunbirdDesktop?.syncDouyinSession) {
+      ElMessage.warning('会话同步仅在 Sunbird OS 桌面版中可用')
+      return
+    }
+    const response = await window.sunbirdDesktop.syncDouyinSession()
+    ElMessage.success(`会话已同步，共 ${response.data?.cookieCount || 0} 个 Cookie`)
+  } catch (error) {
+    ElMessage.error(error.message || '同步抖音会话失败')
+  }
+}
+
+const loadPiSettings = async () => {
+  if (!window.sunbirdDesktop?.getPiSettings) return
+  const settings = await window.sunbirdDesktop.getPiSettings()
+  piSettings.value = { ...piSettings.value, ...settings, apiKey: '' }
+}
+
+const savePiSettings = async () => {
+  if (!window.sunbirdDesktop?.savePiSettings) {
+    ElMessage.warning('PI Agent仅在 Sunbird OS桌面版中可用')
+    return
+  }
+  await window.sunbirdDesktop.savePiSettings(piSettings.value)
+  piSettings.value.apiKey = ''
+  ElMessage.success('PI Agent模型配置已安全保存')
+}
+
+const runPiAgent = async () => {
+  if (!piPrompt.value.trim()) return ElMessage.warning('请输入 Agent任务')
+  if (!window.sunbirdDesktop?.piPrompt) return ElMessage.warning('PI Agent仅在 Sunbird OS桌面版中可用')
+  piRunning.value = true
+  piResult.value = ''
+  try {
+    const result = await window.sunbirdDesktop.piPrompt({ prompt: piPrompt.value.trim(), authToken: localStorage.getItem('token') || '' })
+    piResult.value = result.content || '任务已完成'
+  } catch (error) {
+    ElMessage.error(error.message || 'PI Agent运行失败')
+  } finally {
+    piRunning.value = false
   }
 }
 
@@ -563,7 +696,10 @@ const regenerateVideoAnalysis = async () => {
   }
 }
 
-onMounted(fetchAccounts)
+onMounted(() => {
+  fetchAccounts()
+  loadPiSettings()
+})
 </script>
 
 <style lang="scss" scoped>
@@ -579,6 +715,8 @@ onMounted(fetchAccounts)
   }
 
   .add-card,
+  .agent-card,
+  .search-card,
   .auto-card,
   .videos-card {
     margin-bottom: 16px;
@@ -605,6 +743,13 @@ onMounted(fetchAccounts)
   .auto-results {
     margin-top: 12px;
   }
+
+  .search-results { margin-top: 14px; }
+  .agent-result { margin-top: 14px; white-space: pre-wrap; }
+  .search-content { display: flex; gap: 10px; align-items: center; min-width: 0; }
+  .search-cover { width: 48px; height: 64px; border-radius: 4px; flex: 0 0 auto; }
+  .search-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .search-author { color: #909399; font-size: 12px; margin-top: 5px; }
 
   .auto-account-name {
     margin-bottom: 4px;
