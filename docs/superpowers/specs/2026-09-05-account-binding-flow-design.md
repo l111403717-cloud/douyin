@@ -10,7 +10,7 @@
 
 ### 2.1 本次包含
 
-- 修复 `GET /login` 的 SSE token 校验。
+- 将 `GET /login` 设为本机公开的 SSE 扫码入口，不再校验太阳鸟 token。
 - 使用独立登录会话标识管理并发扫码任务。
 - 抖音扫码后获取真实的平台账号 ID 和昵称。
 - 为本地账号补充平台身份字段、时间字段及唯一约束。
@@ -31,21 +31,21 @@
 账号绑定分为四个明确阶段：
 
 1. 前端创建带随机 `loginSessionId` 的 SSE 连接。
-2. 后端验证桌面授权 token，创建仅属于该连接的状态队列并启动平台登录任务。
+2. 后端校验登录会话参数，创建仅属于该连接的状态队列并启动平台登录任务。
 3. 平台登录模块完成扫码、Cookie 校验和真实身份解析。
 4. 账号服务在事务中执行幂等绑定，提交成功后再向 SSE 发送成功事件。
 
 路由层只负责参数、认证和 SSE 响应；登录编排放在 `backend_app/modules/accounts/login_service.py`；账号查询和写入放在 `backend_app/modules/accounts/repository.py`；平台浏览器操作保留在 `myUtils/login.py`，但返回结构化登录结果，不直接写数据库。
 
-## 4. SSE 认证与登录会话
+## 4. SSE 访问边界与登录会话
 
-### 4.1 token 规则
+### 4.1 公开入口规则
 
-普通 API 继续只接受 `Authorization: Bearer <token>`。由于原生 `EventSource` 无法设置自定义请求头，只有 `GET /login` 可以从 `token` 查询参数读取 token。
+普通 API 继续只接受 `Authorization: Bearer <token>`。`GET /login` 作为本机平台账号扫码入口加入公开路径，不读取或校验请求头及查询参数中的太阳鸟 token。
 
-查询参数 token 必须经过与请求头 token 相同的序列化器、最大有效期和 `license:` 身份校验。缺失、签名错误、过期或不属于许可证身份时返回 HTTP 401，且不得启动浏览器线程。
+前端不再向 `/login` URL 拼接 token，避免凭据出现在访问日志、浏览器记录或错误报告中。后端忽略客户端传入的同名查询参数，兼容旧前端请求但不把它作为授权依据。
 
-token 出现在 URL 中存在日志泄露风险，因此后端日志不得打印完整查询字符串，前端不得把 URL 或 token 写入控制台。该兼容方式仅限本地回环服务；不得扩展到其他接口。
+取消认证只适用于绑定到 `127.0.0.1` 的本地后端。应用不得把 Flask 服务监听地址改为局域网或公网地址；若未来需要远程访问，必须重新为账号绑定会话增加不可出现在 URL 中的安全认证机制。
 
 ### 4.2 登录会话
 
@@ -140,7 +140,6 @@ POST /accounts/{account_id}/validate
 
 稳定错误码至少包括：
 
-- `AUTH_TOKEN_INVALID`
 - `LOGIN_SESSION_CONFLICT`
 - `LOGIN_TIMEOUT`
 - `QR_CODE_UNAVAILABLE`
@@ -165,8 +164,9 @@ POST /accounts/{account_id}/validate
 
 后端测试覆盖：
 
-- `/login` 接受有效查询 token，拒绝缺失、过期、签名错误和非许可证 token。
-- 认证失败时不启动登录线程。
+- `/login` 在没有 token 时可以建立 SSE 会话，旧客户端携带 token 时也不会返回 401。
+- 普通受保护接口仍然拒绝缺失、过期、签名错误和非许可证 token。
+- 前端生成的 `/login` URL 不包含 token。
 - 同名账号使用不同会话互不覆盖，会话在所有退出路径被清理。
 - 新抖音身份创建、重复身份幂等更新、重新登录同号成功和错号拒绝。
 - 临时 Cookie 在失败时删除，成功时替换，数据库失败时保留旧文件。
