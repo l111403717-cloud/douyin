@@ -33,6 +33,18 @@ export const benchmarkApi = {
     return http.post('/benchmark/douyin/auto-discover', { keywords, limit, maxVideos })
   },
 
+  createContentSearch: ({ keyword, targetCount = 50 }) => {
+    return http.post('/benchmark/douyin/content-search', { keyword, targetCount })
+  },
+
+  openDouyinLogin: () => http.post('/benchmark/douyin/login'),
+
+  getContentSearchTask: (taskId) => http.get(`/benchmark/douyin/content-search/${taskId}`),
+
+  getContentSearchResults: (taskId) => http.get(`/benchmark/douyin/content-search/${taskId}/results`),
+
+  getAllDouyinVideos: (params = {}) => http.get('/benchmark/douyin/videos', params),
+
   getIdeaRadarVideos: (limit = 80) => {
     return http.get('/idea-radar/douyin/videos', { limit })
   },

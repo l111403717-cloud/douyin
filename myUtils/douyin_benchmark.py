@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -7,6 +8,34 @@ from playwright.async_api import async_playwright
 
 from conf import BASE_DIR
 from utils.base_social_media import set_init_script
+
+
+def launch_options():
+    options = {"headless": True}
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY")
+    if proxy:
+        options["proxy"] = {"server": proxy}
+    return options
+
+
+def douyin_profile_dir():
+    path = Path(BASE_DIR) / "cookiesFile" / "douyin_browser_profile"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+async def open_douyin_login_browser(timeout_ms=600000):
+    """打开可见的持久化浏览器，用户完成扫码/验证后关闭窗口即可。"""
+    options = launch_options()
+    options["headless"] = False
+    async with async_playwright() as playwright:
+        context = await playwright.chromium.launch_persistent_context(
+            str(douyin_profile_dir()), **options, viewport={"width": 1440, "height": 1000}, locale="zh-CN"
+        )
+        page = context.pages[0] if context.pages else await context.new_page()
+        await page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(timeout_ms)
+        await context.close()
 
 
 def normalize_douyin_url(url):
@@ -109,7 +138,7 @@ async def discover_douyin_benchmark_accounts(
     results = []
     seen = set()
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
+        browser = await playwright.chromium.launch(**launch_options())
         context_kwargs = {
             "viewport": {"width": 1440, "height": 1200},
             "locale": "zh-CN",
@@ -202,6 +231,66 @@ async def discover_douyin_benchmark_accounts(
     return results[:limit]
 
 
+async def search_douyin_content(keywords, cookie_file=None, target_count=50, scroll_rounds=12):
+    """采集抖音综合内容搜索结果，保留页面原始顺序。"""
+    keyword_list = [item.strip() for item in (keywords or []) if item and item.strip()]
+    if not keyword_list:
+        raise ValueError("请至少输入一个内容关键词")
+    target_count = max(1, min(int(target_count or 50), 100))
+    storage_state = None
+    electron_state = Path(BASE_DIR / "cookiesFile" / "douyin-electron-session.json")
+    if electron_state.exists():
+        storage_state = electron_state
+    if cookie_file:
+        cookie_path = Path(BASE_DIR / "cookiesFile" / cookie_file)
+        if cookie_path.exists() and storage_state is None:
+            storage_state = cookie_path
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(**launch_options())
+        kwargs = {"viewport": {"width": 1440, "height": 1200}, "locale": "zh-CN"}
+        if storage_state:
+            kwargs["storage_state"] = storage_state
+        context = await set_init_script(await browser.new_context(**kwargs))
+        page = await context.new_page()
+        results = []
+        seen = set()
+        for keyword in keyword_list:
+            await page.goto(f"https://www.douyin.com/search/{quote(keyword)}?type=video", wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(5000)
+            page_hint = f"{await page.title()} {await page.locator('body').inner_text(timeout=10000)}"
+            if any(token in page_hint for token in ("验证码", "安全验证", "人机验证")):
+                raise RuntimeError("抖音触发了验证码，请先完成登录/验证后再搜索")
+            for _ in range(scroll_rounds + 1):
+                items = await page.evaluate("""() => {
+                  const clean = v => (v || '').replace(/\\s+/g, ' ').trim();
+                  const count = v => { const t = clean(v); const m = t.match(/^([\\d.,]+)\\s*([万wW])?$/); if (!m) return {raw:'', value:null}; return {raw:t, value: Math.round(parseFloat(m[1].replace(/,/g,'')) * (m[2] ? 10000 : 1))}; };
+                  const out = []; const local = new Set();
+                  for (const a of Array.from(document.querySelectorAll('a[href]'))) {
+                    let href = ''; try { const u = new URL(a.href); u.search=''; u.hash=''; href=u.toString(); } catch (_) {}
+                    if (!/douyin\\.com\\/(video|note)\\//.test(href) || local.has(href)) continue;
+                    local.add(href); const card = a.closest('li, div') || a; const img = card.querySelector('img');
+                    const lines = (card.innerText || a.innerText || '').split(/\\n|\\r/).map(clean).filter(Boolean);
+                    const metric = lines.map(count).find(x => x.raw) || {raw:'', value:null};
+                    const title = lines.find(x => x.length > 1 && x.length <= 260 && !count(x).raw && !/^(赞|评论|分享|收藏|打开|播放|更多)$/.test(x)) || '';
+                    const authorLink = Array.from(card.querySelectorAll('a[href]')).find(x => /douyin\\.com\\/user\\//.test(x.href));
+                    out.push({video_url: href, title, cover_url: img?.src || '', like_count: metric.raw, like_count_value: metric.value, author_name: clean(authorLink?.innerText || ''), author_url: authorLink?.href || '', video_type: href.includes('/note/') ? 'note' : 'video'});
+                  } return out;
+                }""")
+                for item in items:
+                    if item.get("video_url") in seen:
+                        continue
+                    if not item.get("title"):
+                        continue
+                    seen.add(item["video_url"]); item["source_rank"] = len(results) + 1; item["source_keyword"] = keyword; results.append(item)
+                    if len(results) >= target_count: break
+                if len(results) >= target_count: break
+                await page.mouse.wheel(0, 2400); await page.wait_for_timeout(1600)
+            if len(results) >= target_count: break
+        await context.close()
+        await browser.close()
+    return results[:target_count]
+
+
 async def scrape_douyin_benchmark(
     homepage_url,
     cookie_file=None,
@@ -219,7 +308,7 @@ async def scrape_douyin_benchmark(
             storage_state = cookie_path
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
+        browser = await playwright.chromium.launch(**launch_options())
         context_kwargs = {
             "viewport": {"width": 1440, "height": 1200},
             "locale": "zh-CN",

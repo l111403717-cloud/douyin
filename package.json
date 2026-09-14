@@ -1,0 +1,91 @@
+{
+  "name": "social-auto-upload-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local desktop shell for Social Auto Upload.",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "frontend:install": "npm --prefix sau_frontend install",
+    "frontend:dev": "npm --prefix sau_frontend run dev",
+    "frontend:build": "npm --prefix sau_frontend run build",
+    "backend:build": "scripts\\build-backend.bat",
+    "playwright:bundle": "scripts\\bundle-playwright-browsers.bat",
+    "whisper:bundle": "scripts\\bundle-whisper-model.bat",
+    "desktop:dev": "cross-env ELECTRON_START_URL=http://localhost:5173 electron .",
+    "desktop:pack": "npm run frontend:build && npm run backend:build && npm run playwright:bundle && npm run whisper:bundle && electron-builder --dir",
+    "desktop:dist": "npm run frontend:build && npm run backend:build && npm run playwright:bundle && npm run whisper:bundle && electron-builder"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^43.2.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.sunbird.socialautoupload",
+    "productName": "Sunbird OS",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "sau_frontend/dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/sau_backend",
+        "to": "backend-runtime",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build-resources/ms-playwright",
+        "to": "ms-playwright",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build-resources/huggingface",
+        "to": "huggingface",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": ".",
+        "to": "backend-source",
+        "filter": [
+          "sau_backend.py",
+          "sau_koubo_server.py",
+          "conf.py",
+          "requirements.txt",
+          "db/**/*",
+          "myUtils/**/*",
+          "uploader/**/*",
+          "utils/**/*",
+          "koubo_integration/**/*",
+          "sau_backend/**/*",
+          "!**/.venv/**/*",
+          "!**/node_modules/**/*",
+          "!**/__pycache__/**/*"
+        ]
+      }
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "typebox": "^1.3.11"
+  }
+}

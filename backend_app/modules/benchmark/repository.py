@@ -46,7 +46,7 @@ def ensure_tables(db_path):
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS douyin_benchmark_videos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            account_id INTEGER NOT NULL,
+            account_id INTEGER,
             video_url TEXT NOT NULL,
             title TEXT,
             cover_url TEXT,
@@ -59,6 +59,74 @@ def ensure_tables(db_path):
             UNIQUE(account_id, video_url)
         )
         ''')
+        video_info = cursor.execute("PRAGMA table_info(douyin_benchmark_videos)").fetchall()
+        account_info = next((row for row in video_info if row[1] == "account_id"), None)
+        if account_info and account_info[3]:
+            cursor.execute("ALTER TABLE douyin_benchmark_videos RENAME TO douyin_benchmark_videos_legacy")
+            cursor.execute('''
+            CREATE TABLE douyin_benchmark_videos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER,
+                video_url TEXT NOT NULL,
+                title TEXT,
+                cover_url TEXT,
+                like_count TEXT,
+                comment_count TEXT,
+                share_count TEXT,
+                collect_count TEXT,
+                raw_data TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                source_type TEXT NOT NULL DEFAULT 'account_sync',
+                source_keyword TEXT,
+                search_task_id INTEGER,
+                source_rank INTEGER,
+                author_name TEXT,
+                author_url TEXT,
+                author_sec_uid TEXT,
+                video_type TEXT DEFAULT 'video',
+                like_count_value INTEGER,
+                UNIQUE(account_id, video_url)
+            )
+            ''')
+            cursor.execute('''
+            INSERT INTO douyin_benchmark_videos
+                (id, account_id, video_url, title, cover_url, like_count, comment_count,
+                 share_count, collect_count, raw_data, created_at)
+            SELECT id, account_id, video_url, title, cover_url, like_count, comment_count,
+                   share_count, collect_count, raw_data, created_at
+            FROM douyin_benchmark_videos_legacy
+            ''')
+            cursor.execute("DROP TABLE douyin_benchmark_videos_legacy")
+        video_columns = {row[1] for row in cursor.execute("PRAGMA table_info(douyin_benchmark_videos)").fetchall()}
+        for column_name, definition in {
+            "source_type": "TEXT NOT NULL DEFAULT 'account_sync'",
+            "source_keyword": "TEXT",
+            "search_task_id": "INTEGER",
+            "source_rank": "INTEGER",
+            "author_name": "TEXT",
+            "author_url": "TEXT",
+            "author_sec_uid": "TEXT",
+            "video_type": "TEXT DEFAULT 'video'",
+            "like_count_value": "INTEGER",
+        }.items():
+            if column_name not in video_columns:
+                cursor.execute(f"ALTER TABLE douyin_benchmark_videos ADD COLUMN {column_name} {definition}")
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS douyin_content_search_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword TEXT NOT NULL,
+            target_count INTEGER NOT NULL DEFAULT 50,
+            status TEXT NOT NULL DEFAULT 'pending',
+            collected_count INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            started_at DATETIME,
+            finished_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_benchmark_videos_source ON douyin_benchmark_videos(source_type, search_task_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_benchmark_videos_title ON douyin_benchmark_videos(title)")
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS douyin_benchmark_video_analysis (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,6 +251,100 @@ def list_videos(db_path, account_id):
         ORDER BY id DESC
         ''', (account_id,)).fetchall()
     return [dict(row) for row in rows]
+
+
+def create_search_task(db_path, keyword, target_count):
+    ensure_tables(db_path)
+    with sqlite3.connect(Path(db_path)) as conn:
+        cursor = conn.execute(
+            "INSERT INTO douyin_content_search_tasks (keyword, target_count, status) VALUES (?, ?, 'pending')",
+            (keyword, target_count),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def update_search_task(db_path, task_id, **fields):
+    ensure_tables(db_path)
+    allowed = {"status", "collected_count", "error_message", "started_at", "finished_at"}
+    values = {key: value for key, value in fields.items() if key in allowed}
+    if not values:
+        return
+    values["updated_at"] = "CURRENT_TIMESTAMP"
+    assignments = ", ".join(
+        f"{key} = CURRENT_TIMESTAMP" if value == "CURRENT_TIMESTAMP" else f"{key} = ?"
+        for key, value in values.items()
+    )
+    params = [value for value in values.values() if value != "CURRENT_TIMESTAMP"]
+    params.append(task_id)
+    with sqlite3.connect(Path(db_path)) as conn:
+        conn.execute(f"UPDATE douyin_content_search_tasks SET {assignments} WHERE id = ?", params)
+        conn.commit()
+
+
+def get_search_task(db_path, task_id):
+    ensure_tables(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM douyin_content_search_tasks WHERE id = ?", (task_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_search_results(db_path, task_id):
+    ensure_tables(db_path)
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT v.*, a.nickname AS account_name FROM douyin_benchmark_videos v "
+            "LEFT JOIN douyin_benchmark_accounts a ON a.id = v.account_id "
+            "WHERE v.search_task_id = ? ORDER BY v.source_rank ASC, v.id ASC",
+            (task_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_all_videos(db_path, keyword=None, source_type=None, limit=200):
+    ensure_tables(db_path)
+    clauses, params = [], []
+    if keyword:
+        clauses.append("(COALESCE(v.title, '') LIKE ? OR COALESCE(v.source_keyword, '') LIKE ?)")
+        params.extend([f"%{keyword}%", f"%{keyword}%"])
+    if source_type:
+        clauses.append("v.source_type = ?")
+        params.append(source_type)
+    params.append(max(1, min(int(limit or 200), 500)))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT v.*, a.nickname AS account_name FROM douyin_benchmark_videos v "
+            f"LEFT JOIN douyin_benchmark_accounts a ON a.id = v.account_id {where} ORDER BY v.id DESC LIMIT ?",
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def save_search_results(db_path, task_id, keyword, videos):
+    ensure_tables(db_path)
+    inserted = 0
+    with sqlite3.connect(Path(db_path)) as conn:
+        for video in videos:
+            url = video.get("video_url")
+            if not url:
+                continue
+            existing = conn.execute("SELECT id FROM douyin_benchmark_videos WHERE video_url = ? LIMIT 1", (url,)).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE douyin_benchmark_videos SET search_task_id = COALESCE(search_task_id, ?), source_keyword = COALESCE(source_keyword, ?), "
+                    "source_rank = COALESCE(source_rank, ?), author_name = COALESCE(author_name, ?), author_url = COALESCE(author_url, ?), "
+                    "like_count = COALESCE(like_count, ?), like_count_value = COALESCE(like_count_value, ?) WHERE id = ?",
+                    (task_id, keyword, video.get("source_rank"), video.get("author_name"), video.get("author_url"), video.get("like_count"), video.get("like_count_value"), existing[0]),
+                )
+                continue
+            conn.execute(
+                "INSERT INTO douyin_benchmark_videos (account_id, video_url, title, cover_url, like_count, raw_data, source_type, source_keyword, search_task_id, source_rank, author_name, author_url, author_sec_uid, video_type, like_count_value) VALUES (NULL, ?, ?, ?, ?, ?, 'content_search', ?, ?, ?, ?, ?, ?, ?, ?)",
+                (url, video.get("title"), video.get("cover_url"), video.get("like_count"), json.dumps(video, ensure_ascii=False), keyword, task_id, video.get("source_rank"), video.get("author_name"), video.get("author_url"), video.get("author_sec_uid"), video.get("video_type") or "video", video.get("like_count_value")),
+            )
+            inserted += 1
+        conn.commit()
+    return inserted
 
 
 def get_video(db_path, video_id, include_account=False):
