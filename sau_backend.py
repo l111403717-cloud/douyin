@@ -337,29 +337,51 @@ def test_hermes_settings():
         payload = request.get_json(silent=True) or {}
         saved_settings = load_runtime_settings()
         saved_hermes = get_hermes_settings(saved_settings)
-        gateway_url = str(payload.get("gatewayUrl") or "").strip().rstrip("/")
+        gateway_url = str(payload.get("gatewayUrl") or saved_hermes.get("gatewayUrl") or "").strip().rstrip("/")
         if not re.match(r"^https?://", gateway_url, re.IGNORECASE):
             return jsonify({"code": 400, "message": "Gateway 地址必须以 http:// 或 https:// 开头"}), 400
         try:
-            timeout = max(10, min(int(payload.get("timeout") or saved_hermes["timeout"]), 1800))
+            timeout = max(10, min(int(payload.get("timeout") or saved_hermes.get("timeout") or 300), 1800))
         except (TypeError, ValueError):
             return jsonify({"code": 400, "message": "超时时间必须是数字"}), 400
+        
+        from backend_app.agent.gateway_client import clean_api_key
+        api_key = str(payload.get("apiKey") or saved_hermes.get("apiKey") or "").strip()
+        api_key = clean_api_key(api_key)
+
         test_settings = {
             "hermes": {
                 "gatewayUrl": gateway_url,
-                "apiKey": str(payload.get("apiKey") or saved_hermes["apiKey"]).strip(),
+                "apiKey": api_key,
                 "timeout": timeout,
             }
         }
-        health = hermes_request("/health", timeout=min(timeout, 15), settings=test_settings)
+        
+        health = None
+        models_count = 0
+        try:
+            health = hermes_request("/health", timeout=min(timeout, 10), settings=test_settings)
+        except Exception as exc:
+            backend_log(f"/health unavailable, trying /models: {exc}")
+            try:
+                models_resp = hermes_request("/models", timeout=min(timeout, 15), settings=test_settings)
+                data_list = models_resp.get("data") if isinstance(models_resp, dict) else []
+                models_count = len(data_list)
+                health = {"status": "ok", "models": models_count}
+            except Exception as exc2:
+                backend_log(f"/models also failed: {exc2}")
+                raise exc2
+
         capabilities = None
         try:
             capabilities = hermes_request(
-                "/v1/capabilities", timeout=min(timeout, 20), settings=test_settings
+                "/v1/capabilities", timeout=min(timeout, 10), settings=test_settings
             )
-        except Exception as exc:
-            backend_log(f"Hermes capabilities unavailable, using legacy mode: {exc}")
-        return jsonify({"code": 200, "message": "Hermes Gateway 连接正常", "data": {
+        except Exception:
+            pass
+
+        msg = f"Gateway 连接正常（检测到 {models_count} 个可用模型）" if models_count else "Hermes Gateway 连接正常"
+        return jsonify({"code": 200, "message": msg, "data": {
             "health": health, "capabilities": capabilities,
             "legacyMode": capabilities is None,
         }})
@@ -372,11 +394,19 @@ def discover_hermes_models():
     try:
         refresh = request.args.get("refresh") in {"1", "true", "True"}
         path = "/api/model/options?refresh=1" if refresh else "/api/model/options"
+        options = None
         try:
             options = hermes_request(path, timeout=60 if refresh else 30)
         except Exception as exc:
-            backend_log(f"Hermes rich model catalog unavailable, using /v1/models: {exc}")
-            legacy = hermes_request("/v1/models", timeout=30)
+            backend_log(f"Hermes rich model catalog unavailable, trying /models: {exc}")
+            legacy = None
+            for model_path in ("/models", "/v1/models"):
+                try:
+                    legacy = hermes_request(model_path, timeout=30)
+                    if legacy and isinstance(legacy, dict) and "data" in legacy:
+                        break
+                except Exception:
+                    continue
             rows = legacy.get("data") if isinstance(legacy, dict) else []
             options = {
                 "legacyMode": True,
@@ -391,6 +421,42 @@ def discover_hermes_models():
         return jsonify({"code": 200, "data": options})
     except Exception as exc:
         return jsonify({"code": 502, "message": str(exc), "data": None}), 502
+
+
+@app.route("/api/test-llm-models", methods=["POST"])
+def test_llm_models():
+    try:
+        payload = request.get_json(silent=True) or {}
+        base_url = str(payload.get("baseUrl") or "").strip().rstrip("/")
+        from backend_app.agent.gateway_client import clean_api_key
+        api_key = clean_api_key(str(payload.get("apiKey") or "").strip())
+        
+        if not re.match(r"^https?://", base_url, re.IGNORECASE):
+            return jsonify({"code": 400, "message": "Base URL 必须以 http:// 或 https:// 开头"}), 400
+        
+        if base_url.endswith("/v1"):
+            url = f"{base_url}/models"
+        else:
+            url = f"{base_url}/v1/models"
+        
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+            
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            models = [m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
+            return jsonify({
+                "code": 200,
+                "message": f"连接成功！获取到 {len(models)} 个可用模型",
+                "data": {"models": models, "cleanedApiKey": api_key}
+            })
+    except Exception as exc:
+        return jsonify({"code": 502, "message": f"连接失败：{str(exc)}", "data": None}), 502
 
 
 @app.route("/settings/agent-models", methods=["GET", "POST"])
@@ -1550,20 +1616,29 @@ ensure_douyin_own_tables()
 # 获取当前目录（假设 index.html 和 assets 在这里）
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
-# 处理所有静态资源请求（未来打包用）
-@app.route('/assets/<filename>')
+# 处理所有静态资源请求
+@app.route('/assets/<path:filename>')
 def custom_static(filename):
+    dist_assets = os.path.join(current_dir, 'sau_frontend', 'dist', 'assets')
+    if os.path.exists(os.path.join(dist_assets, filename)):
+        return send_from_directory(dist_assets, filename)
     return send_from_directory(os.path.join(current_dir, 'assets'), filename)
 
-# 处理 favicon.ico 静态资源（未来打包用）
+# 处理 favicon.ico 静态资源
 @app.route('/favicon.ico')
-def favicon(filename):
+def favicon():
+    dist_dir = os.path.join(current_dir, 'sau_frontend', 'dist')
+    if os.path.exists(os.path.join(dist_dir, 'favicon.ico')):
+        return send_from_directory(dist_dir, 'favicon.ico')
     return send_from_directory(os.path.join(current_dir, 'assets'), 'favicon.ico')
 
-# （未来打包用）
+# 首页服务
 @app.route('/')
-def hello_world():  # put application's code here
-    return render_template('index.html')
+def hello_world():
+    dist_dir = os.path.join(current_dir, 'sau_frontend', 'dist')
+    if os.path.exists(os.path.join(dist_dir, 'index.html')):
+        return send_from_directory(dist_dir, 'index.html')
+    return "<h3>Sunbird OS 后端服务运行中</h3>"
 
 @app.route('/upload', methods=['POST'])
 def upload_file():

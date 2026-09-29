@@ -126,9 +126,16 @@ const saveConnection = async () => {
 }
 const testConnection = async () => {
   testingConnection.value = true
-  try { await agentModelsApi.testHermes(); Object.assign(connectionStatus, { type: 'success', label: '连接正常' }); ElMessage.success('Hermes Gateway 连接正常') }
-  catch { Object.assign(connectionStatus, { type: 'danger', label: '连接失败' }) }
-  finally { testingConnection.value = false }
+  try {
+    const res = await agentModelsApi.testHermes(hermesForm)
+    Object.assign(connectionStatus, { type: 'success', label: '连接正常' })
+    ElMessage.success(res?.message || 'Gateway 连接正常')
+  } catch (err) {
+    Object.assign(connectionStatus, { type: 'danger', label: '连接失败' })
+    ElMessage.error(err?.message || '连接失败')
+  } finally {
+    testingConnection.value = false
+  }
 }
 const discoverModels = async (refresh = false) => {
   discovering.value = true

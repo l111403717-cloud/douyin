@@ -1,0 +1,33 @@
+{
+  "codexCliPath": "",
+  "codexAnalysisModel": "deepseek-v4-flash",
+  "codexAnalysisTimeout": 180,
+  "hermes": {
+    "gatewayUrl": "https://tntapi.com/v1",
+    "apiKey": "",
+    "timeout": 300
+  },
+  "agentModels": [
+    {
+      "id": "deepseek-v4-flash",
+      "name": "DeepSeek V4 Flash",
+      "provider": "gateway-default",
+      "model": "deepseek-v4-flash",
+      "reasoningEffort": "",
+      "serviceTier": "",
+      "enabled": true
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "name": "DeepSeek V4 Pro",
+      "provider": "gateway-default",
+      "model": "deepseek-v4-pro",
+      "reasoningEffort": "",
+      "serviceTier": "",
+      "enabled": true
+    }
+  ],
+  "taskModels": {
+    "viralAnalysis": "deepseek-v4-flash"
+  }
+}

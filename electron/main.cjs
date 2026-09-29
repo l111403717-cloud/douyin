@@ -227,7 +227,7 @@ function createWindow() {
     height: 900,
     minWidth: 1100,
     minHeight: 720,
-    title: 'Sunbird OS',
+    title: '抖音对标',
     backgroundColor: '#f6f7f9',
     webPreferences: {
       contextIsolation: true,

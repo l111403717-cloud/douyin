@@ -3,7 +3,7 @@ import { http } from '@/utils/request'
 export const agentModelsApi = {
   getHermesSettings: () => http.get('/settings/hermes'),
   saveHermesSettings: (data) => http.put('/settings/hermes', data),
-  testHermes: () => http.post('/settings/hermes/test'),
+  testHermes: (data) => http.post('/settings/hermes/test', data),
   discoverModels: (refresh = false) => http.get('/settings/hermes/models', { refresh: refresh ? 1 : 0 }),
   getAgentModels: () => http.get('/settings/agent-models'),
   createAgentModel: (data) => http.post('/settings/agent-models', data),

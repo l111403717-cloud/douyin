@@ -8,9 +8,26 @@
       <template #header><div class="card-header"><span>PI Agent</span><el-button size="small" @click="savePiSettings">保存模型配置</el-button></div></template>
       <el-form label-width="90px">
         <div class="auto-options">
-          <el-form-item label="Base URL"><el-input v-model="piSettings.baseUrl" style="width: 280px" /></el-form-item>
-          <el-form-item label="模型"><el-select v-model="piSettings.model" style="width: 210px"><el-option label="DeepSeek V4 Flash" value="deepseek-v4-flash" /><el-option label="DeepSeek V4 Pro" value="deepseek-v4-pro" /></el-select></el-form-item>
-          <el-form-item label="API Key"><el-input v-model="piSettings.apiKey" type="password" show-password style="width: 260px" placeholder="仅保存在本机安全存储" /></el-form-item>
+          <el-form-item label="Base URL"><el-input v-model="piSettings.baseUrl" style="width: 260px" placeholder="https://..." /></el-form-item>
+          <el-form-item label="模型">
+            <el-select
+              v-model="piSettings.model"
+              filterable
+              allow-create
+              default-first-option
+              style="width: 220px"
+              placeholder="选择或输入模型"
+            >
+              <el-option
+                v-for="item in piModelOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="API Key"><el-input v-model="piSettings.apiKey" type="password" show-password style="width: 240px" placeholder="已配置，留空保持不变" /></el-form-item>
+          <el-button type="primary" plain :loading="testingPiConnection" @click="testPiConnection">测试可用模型</el-button>
         </div>
       </el-form>
       <div class="add-row">
@@ -374,6 +391,7 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { benchmarkApi } from '@/api/benchmark'
+import { http } from '@/utils/request'
 
 const homepageUrl = ref('')
 const autoKeywords = ref('')
@@ -399,7 +417,17 @@ const contentTargetCount = ref(50)
 const contentSearching = ref(false)
 const searchTask = ref(null)
 const contentResults = ref([])
-const piSettings = ref({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-v4-flash', apiKey: '' })
+const piSettings = ref({
+  baseUrl: 'https://tntapi.com/v1',
+  model: 'deepseek-v4-flash',
+  apiKey: ''
+})
+const piModelOptions = ref([
+  { label: 'DeepSeek V4 Flash', value: 'deepseek-v4-flash' },
+  { label: 'DeepSeek V4 Pro', value: 'deepseek-v4-pro' },
+  { label: 'DeepSeek V4.1 Flash', value: 'deepseek-v4.1-flash' }
+])
+const testingPiConnection = ref(false)
 const piPrompt = ref('')
 const piResult = ref('')
 const piRunning = ref(false)
@@ -547,20 +575,62 @@ const syncDouyinSession = async () => {
   }
 }
 
+const testPiConnection = async () => {
+  if (!piSettings.value.baseUrl) {
+    return ElMessage.warning('请输入 Base URL')
+  }
+  testingPiConnection.value = true
+  try {
+    const res = await http.post('/api/test-llm-models', {
+      baseUrl: piSettings.value.baseUrl,
+      apiKey: piSettings.value.apiKey
+    })
+    if (res?.data?.cleanedApiKey) {
+      piSettings.value.apiKey = res.data.cleanedApiKey
+    }
+    const models = res?.data?.models || []
+    if (models.length > 0) {
+      piModelOptions.value = models.map((m) => ({ label: m, value: m }))
+      if (!models.includes(piSettings.value.model)) {
+        piSettings.value.model = models[0]
+      }
+      ElMessage.success(res.message || `测试成功，已读取 ${models.length} 个可用模型`)
+    } else {
+      ElMessage.success('连接成功')
+    }
+  } catch (err) {
+    ElMessage.error(err.message || '连接失败，请检查 Base URL 和 API Key')
+  } finally {
+    testingPiConnection.value = false
+  }
+}
+
 const loadPiSettings = async () => {
   if (!window.sunbirdDesktop?.getPiSettings) return
   const settings = await window.sunbirdDesktop.getPiSettings()
-  piSettings.value = { ...piSettings.value, ...settings, apiKey: '' }
+  if (settings) {
+    piSettings.value = {
+      ...piSettings.value,
+      ...settings,
+      apiKey: settings.apiKey || piSettings.value.apiKey || ''
+    }
+    if (settings.model && !piModelOptions.value.some((item) => item.value === settings.model)) {
+      piModelOptions.value.push({ label: settings.model, value: settings.model })
+    }
+  }
 }
 
 const savePiSettings = async () => {
+  if (piSettings.value.apiKey && piSettings.value.apiKey.includes('sk-')) {
+    const match = piSettings.value.apiKey.match(/sk-[a-zA-Z0-9_\-]+/)
+    if (match) piSettings.value.apiKey = match[0]
+  }
   if (!window.sunbirdDesktop?.savePiSettings) {
-    ElMessage.warning('PI Agent仅在 Sunbird OS桌面版中可用')
+    ElMessage.success('PI Agent 配置已在网页端更新')
     return
   }
   await window.sunbirdDesktop.savePiSettings(piSettings.value)
-  piSettings.value.apiKey = ''
-  ElMessage.success('PI Agent模型配置已安全保存')
+  ElMessage.success('PI Agent 模型配置已安全保存')
 }
 
 const runPiAgent = async () => {

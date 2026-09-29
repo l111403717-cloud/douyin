@@ -17,6 +17,23 @@ const providerId = 'sunbird-deepseek'
 const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sunbird-pi-'))
 const modelsPath = path.join(runtimeDir, 'models.json')
 const authPath = path.join(runtimeDir, 'auth.json')
+const configuredModel = String(config.model || 'deepseek-v4-flash')
+const defaultModelList = [
+  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+  { id: 'deepseek-v4-flash-0731', name: 'DeepSeek V4 Flash 0731' },
+  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+  { id: 'deepseek-v4-pro-0813', name: 'DeepSeek V4 Pro 0813' },
+  { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' },
+  { id: 'deepseek-v4.1-flash-expires-on-0910', name: 'DeepSeek V4.1 Flash (0910)' }
+]
+const allModels = [...defaultModelList]
+if (configuredModel && !allModels.some((m) => m.id === configuredModel)) {
+  allModels.push({ id: configuredModel, name: configuredModel })
+}
+
+const cleanedApiKey = (config.apiKey || '').includes('sk-') && (config.apiKey || '').match(/sk-[a-zA-Z0-9_\-]+/)
+  ? (config.apiKey || '').match(/sk-[a-zA-Z0-9_\-]+/)[0]
+  : (config.apiKey || '')
 
 await fs.writeFile(modelsPath, JSON.stringify({
   providers: {
@@ -24,24 +41,14 @@ await fs.writeFile(modelsPath, JSON.stringify({
       baseUrl,
       api: 'openai-completions',
       authHeader: true,
-      models: [
-        {
-          id: 'deepseek-v4-flash',
-          name: 'DeepSeek V4 Flash',
-          reasoning: true,
-          contextWindow: 128000,
-          maxTokens: 8192,
-          compat: { thinkingFormat: 'deepseek' }
-        },
-        {
-          id: 'deepseek-v4-pro',
-          name: 'DeepSeek V4 Pro',
-          reasoning: true,
-          contextWindow: 128000,
-          maxTokens: 16384,
-          compat: { thinkingFormat: 'deepseek' }
-        }
-      ]
+      models: allModels.map((m) => ({
+        id: m.id,
+        name: m.name,
+        reasoning: true,
+        contextWindow: 128000,
+        maxTokens: 16384,
+        compat: { thinkingFormat: 'deepseek' }
+      }))
     }
   }
 }, null, 2), 'utf8')
@@ -117,7 +124,7 @@ const saveAnalysisTool = defineTool({
 
 try {
   const modelRuntime = await ModelRuntime.create({ authPath, modelsPath })
-  await modelRuntime.setRuntimeApiKey(providerId, config.apiKey)
+  await modelRuntime.setRuntimeApiKey(providerId, cleanedApiKey)
   const modelId = config.model || 'deepseek-v4-flash'
   const model = modelRuntime.getModel(providerId, modelId)
   if (!model) throw new Error(`PI Agent无法加载模型：${modelId}`)

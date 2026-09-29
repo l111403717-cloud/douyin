@@ -185,9 +185,19 @@ ms-playwright/
 
 # database
 db/database.db
+database.db
+*.db
+*.db-journal
 
-# 临时文件夹
+# 临时文件夹与缓存
 cookiesFile
 uploadFile
 videoFile
+.npm_cache/
+.pip_cache/
+.electron_cache/
+
+# 本地个人设置与密钥（禁止上传）
+settings.json
+test_*.bat
 
