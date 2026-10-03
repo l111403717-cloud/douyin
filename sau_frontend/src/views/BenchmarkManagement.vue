@@ -609,9 +609,13 @@ const loadPiSettings = async () => {
   if (!window.sunbirdDesktop?.getPiSettings) return
   const settings = await window.sunbirdDesktop.getPiSettings()
   if (settings) {
+    const baseUrl = (!settings.baseUrl || settings.baseUrl === 'https://api.deepseek.com')
+      ? 'https://tntapi.com/v1'
+      : settings.baseUrl
     piSettings.value = {
       ...piSettings.value,
       ...settings,
+      baseUrl,
       apiKey: settings.apiKey || piSettings.value.apiKey || ''
     }
     if (settings.model && !piModelOptions.value.some((item) => item.value === settings.model)) {

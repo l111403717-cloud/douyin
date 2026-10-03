@@ -12,7 +12,7 @@ const input = JSON.parse(await new Promise((resolve) => {
 }))
 
 const config = input.config || {}
-const baseUrl = String(config.baseUrl || 'https://api.deepseek.com').replace(/\/$/, '')
+const baseUrl = String(config.baseUrl || 'https://tntapi.com/v1').replace(/\/$/, '')
 const providerId = 'sunbird-deepseek'
 const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sunbird-pi-'))
 const modelsPath = path.join(runtimeDir, 'models.json')

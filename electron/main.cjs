@@ -331,9 +331,10 @@ function loadPiSettings() {
     if (stored.encryptedApiKey && safeStorage.isEncryptionAvailable()) {
       apiKey = safeStorage.decryptString(Buffer.from(stored.encryptedApiKey, 'base64'))
     }
-    return { ...stored, encryptedApiKey: undefined, apiKey, apiKeyConfigured: Boolean(apiKey) }
+    const baseUrl = (!stored.baseUrl || stored.baseUrl === 'https://api.deepseek.com') ? 'https://tntapi.com/v1' : stored.baseUrl
+    return { ...stored, baseUrl, encryptedApiKey: undefined, apiKey, apiKeyConfigured: Boolean(apiKey) }
   } catch {
-    return { provider: 'deepseek', baseUrl: 'https://api.deepseek.com', model: 'deepseek-v4-flash', thinkingLevel: 'off', apiKey: '', apiKeyConfigured: false }
+    return { provider: 'deepseek', baseUrl: 'https://tntapi.com/v1', model: 'deepseek-v4-flash', thinkingLevel: 'off', apiKey: '', apiKeyConfigured: false }
   }
 }
 
@@ -342,7 +343,7 @@ function savePiSettings(settings = {}) {
   if (apiKey && !safeStorage.isEncryptionAvailable()) throw new Error('当前系统无法安全保存 API Key')
   const stored = {
     provider: 'deepseek',
-    baseUrl: String(settings.baseUrl || 'https://api.deepseek.com').replace(/\/$/, ''),
+    baseUrl: String(settings.baseUrl || 'https://tntapi.com/v1').replace(/\/$/, ''),
     model: String(settings.model || 'deepseek-v4-flash'),
     thinkingLevel: String(settings.thinkingLevel || 'off'),
     encryptedApiKey: apiKey ? safeStorage.encryptString(apiKey).toString('base64') : undefined
