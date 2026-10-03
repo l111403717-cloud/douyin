@@ -170,12 +170,18 @@ def transcribe_media(media_path, progress_callback=None, log=None):
     except ModuleNotFoundError as exc:
         raise RuntimeError("Missing faster-whisper dependency for local transcription") from exc
 
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    download_root = os.environ.get("HF_HOME")
+    if not download_root:
+        base_dir = Path(__file__).resolve().parents[4]
+        download_root = str(base_dir / "huggingface")
+
     if progress_callback:
         progress_callback(0, "正在启动本地语音识别")
         progress_callback(2, f"正在加载 Whisper {model} 模型")
     if log:
-        log(f"loading faster-whisper model={model} device={device} compute_type={compute_type}")
-    whisper_model = WhisperModel(model, device=device, compute_type=compute_type)
+        log(f"loading faster-whisper model={model} device={device} compute_type={compute_type} download_root={download_root}")
+    whisper_model = WhisperModel(model, device=device, compute_type=compute_type, download_root=download_root)
     if progress_callback:
         progress_callback(5, "模型加载完成，正在读取音视频")
 

@@ -79,3 +79,4 @@ xhs==0.2.13
 yarl==1.20.0
 ykdl==1.8.2
 yt-dlp==2025.5.22
+faster-whisper==1.2.1

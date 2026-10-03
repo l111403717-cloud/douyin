@@ -200,4 +200,5 @@ videoFile
 # 本地个人设置与密钥（禁止上传）
 settings.json
 test_*.bat
+huggingface/
 

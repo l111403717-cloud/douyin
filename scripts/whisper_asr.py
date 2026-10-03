@@ -16,9 +16,15 @@ def emit_progress(percent, message, position=0, duration=0):
 
 def transcribe_with_faster_whisper(media_path, model_name, language, device, compute_type):
     from faster_whisper import WhisperModel
+    import os
+
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    download_root = os.environ.get("HF_HOME")
+    if not download_root:
+        download_root = str(Path(__file__).resolve().parents[1] / "huggingface")
 
     emit_progress(2, f"正在加载 Whisper {model_name} 模型")
-    model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    model = WhisperModel(model_name, device=device, compute_type=compute_type, download_root=download_root)
     emit_progress(5, "模型加载完成，正在读取音频")
     segments, info = model.transcribe(
         str(media_path),
